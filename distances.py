@@ -4,7 +4,7 @@ import numpy as np
 import queue as q
 from threading import Thread
 import sys
-from threading import Event
+
 
 from frame import Frame
 
@@ -21,12 +21,12 @@ def match_points(left, right):
     Assumption based, only works if the same object is within +- 40px on both cameras
     this probably needs adjusting for objects that are further away
     """
-    matched = []
+    match = []
     for left_point in left:
         for right_point in right:
             if abs(left_point[0] - right_point[0]) < 40 and abs(left_point[1] - right_point[1]) < 40:
-                matched.append([left_point,right_point])
-    return matched
+                match.append([left_point, right_point])
+    return match
 
 
 def get_range(correlations, F, P1, P2):
@@ -112,6 +112,7 @@ def process_frames(cap, device):
             # get message from the main, if matching points were found between the 2 threads, this will contain the
             # distances of people
             dist = main_q.get()
+            # if main sends DONE confirmation, clean up, send confirmation back and return
             if dist == DONE:
                 cv2.destroyAllWindows()
                 left_q.put(DONE)
@@ -119,8 +120,10 @@ def process_frames(cap, device):
                 return None
             # write the distance if matches were found
             elif dist != 0:
-                for j in range(len(dist)):
-                    frame.write_distance(detection_points[j], dist[j])
+                # just to be sure, in case there is a synchronisation issue
+                if len(dist) == len(detection_points):
+                    for j in range(len(dist)):
+                        frame.write_distance(detection_points[j], dist[j])
             # draw the rest of the stuff in any case
             frame.draw_boundaries()
             frame.write_time()
@@ -129,6 +132,7 @@ def process_frames(cap, device):
                 frame.show("left")
             else:
                 frame.show("right")
+            # if 'q' key was pressed, send done signal to the main thread to start shutdown
             if cv2.waitKey(int(1000 / FPS)) & 0xFF == ord('q'):
                 left_q.put(DONE)
                 right_q.put(DONE)
@@ -173,6 +177,7 @@ main_q = q.Queue()
 
 if captures[0].isOpened() and captures[1].isOpened():
 
+    # start a thread for each of the cameras to improve performance
     for i in range(len(DEVICES)):
         cam_thread = Thread(target=process_frames, args=(captures[i], DEVICES[i]))
         cam_thread.daemon = True
@@ -180,15 +185,21 @@ if captures[0].isOpened() and captures[1].isOpened():
 
     while 1:
 
+        # read the coords of center points of detected people from each thread
         points_left = left_q.get()
         points_right = right_q.get()
+        # a sort of 3-way handshake in order to exit gracefully destroying all the windows as they belong to individual
+        # threads. If a thread detects 'q' has been pressed, instead of points list it will send DONE signal (1)
         if points_left == DONE or points_right == DONE:
             print("Exiting...")
+            # main confirms it has got the quit signal and sends it back to both threads
             main_q.put(DONE)
             main_q.put(DONE)
+            # after they clean up, both cam threads send confirmation back and return
             left_done = left_q.get()
             right_done = right_q.get()
             finished(0)
+        # if both threads have detected people, try to match the points
         elif points_left != 0 and points_right != 0:
             matched = match_points(points_left, points_right)
             if len(matched) > 0:
